@@ -10,7 +10,7 @@ Built on FiftyOne × TwelveLabs Pegasus
 Dataset: https://www.kaggle.com/datasets/hasyimabdillah/workoutfitness-video
 
 
-Overview
+Overview :
 RepImprov is a FiftyOne plugin that transforms raw workout footage into structured, actionable coaching intelligence. By combining FiftyOne's dataset management and visualization capabilities with TwelveLabs' Pegasus video language model, RepSight automatically analyzes exercise form, flags posture issues, scores performance, and surfaces comparative accuracy metrics across sessions — all browsable inside the FiftyOne App.
 
 Ethan Lee (Dataset loading + TwelveLabs integration)
