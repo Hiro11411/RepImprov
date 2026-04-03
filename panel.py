@@ -1,43 +1,113 @@
 """
 FiftyOne panel: repimprov_dashboard
 
-Hackathon demo dashboard for RepImprov.
-Shows aggregate coaching intelligence across all analyzed workout videos.
+Category browser with video previews.
+Derives exercise category directly from filepath so matching always works,
+even if exercise_folder field was never written.
 """
 
 import logging
-from collections import Counter, defaultdict
+import os
+import re
+from collections import defaultdict
 
 import fiftyone.operators as foo
 import fiftyone.operators.types as types
+from fiftyone import ViewField as F
 
 logger = logging.getLogger(__name__)
 
-# ASCII bar chart config
-BAR_MAX_WIDTH = 20
+
+def _cat_from_path(filepath: str) -> str:
+    """Return the parent folder name of a filepath (the exercise category)."""
+    if not filepath:
+        return "unknown"
+    # Works for both / and \ separators
+    return os.path.basename(os.path.dirname(filepath)).strip() or "unknown"
 
 
-def _bar(value: float, max_value: float, width: int = BAR_MAX_WIDTH) -> str:
-    """Render a scaled ASCII progress bar."""
-    if max_value <= 0:
-        filled = 0
-    else:
-        filled = int(round((value / max_value) * width))
-    filled = max(0, min(width, filled))
-    return "[" + "█" * filled + "░" * (width - filled) + "]"
+def _collect_categories(dataset):
+    """
+    Derives category from filepath (always present) so the panel works even
+    when exercise_folder was never written to the dataset.
+
+    Returns a list of dicts sorted by category name:
+      [{ "raw": "bench press", "display": "Bench Press",
+         "total": 61, "analyzed": 0, "pending": 61 }, ...]
+    """
+    try:
+        paths  = dataset.values("filepath") or []
+        schema = dataset.get_field_schema()
+        scores = dataset.values("form_score") if "form_score" in schema else []
+        logger.debug(
+            "_collect_categories: %d filepaths, form_score in schema=%s",
+            len(paths), "form_score" in schema,
+        )
+    except Exception as exc:
+        logger.exception("_collect_categories: failed to read dataset — %s", exc)
+        return []
+
+    counts = defaultdict(lambda: {"total": 0, "analyzed": 0})
+
+    try:
+        for i, path in enumerate(paths):
+            raw   = _cat_from_path(path)
+            score = scores[i] if i < len(scores) else None
+            counts[raw]["total"] += 1
+            if score is not None:
+                counts[raw]["analyzed"] += 1
+    except Exception as exc:
+        logger.exception("_collect_categories: error building counts — %s", exc)
+
+    result = []
+    for raw, c in sorted(counts.items()):
+        result.append({
+            "raw":      raw,
+            "display":  raw.title(),
+            "total":    c["total"],
+            "analyzed": c["analyzed"],
+            "pending":  c["total"] - c["analyzed"],
+        })
+
+    logger.info("_collect_categories: %d categories from %d filepaths", len(result), len(paths))
+    return result
 
 
-def _score_label(score: float) -> str:
-    """Return a text quality label for a 0-100 score."""
-    if score >= 90:
-        return "Excellent"
-    if score >= 80:
-        return "Good"
-    if score >= 70:
-        return "Fair"
-    if score >= 60:
-        return "Poor"
-    return "Critical"
+def _select_by_folder(dataset, raw: str):
+    """
+    Return a dataset view containing only samples whose filepath has `raw`
+    as the immediate parent folder name.
+
+    Uses pure Python matching on filepaths, then dataset.select_by_filepath()
+    — no regex, no MongoDB expression, no ID lookup.
+    """
+    try:
+        paths = dataset.values("filepath") or []
+    except Exception as exc:
+        logger.exception("_select_by_folder: failed to read filepaths — %s", exc)
+        return dataset.view()
+
+    search = raw.lower()
+    matching_paths = []
+    for path in paths:
+        if not path:
+            continue
+        norm   = path.replace("\\", "/")
+        parts  = norm.split("/")
+        parent = parts[-2].lower() if len(parts) >= 2 else ""
+        if parent == search:
+            matching_paths.append(path)
+
+    logger.info(
+        "_select_by_folder: raw=%r → %d/%d matches",
+        raw, len(matching_paths), len(paths),
+    )
+
+    if not matching_paths:
+        logger.warning("_select_by_folder: no matches for %r", raw)
+        return dataset.view()
+
+    return dataset.select_by("filepath", matching_paths)
 
 
 class RepImprovDashboard(foo.Panel):
@@ -49,254 +119,171 @@ class RepImprovDashboard(foo.Panel):
             icon="/assets/icon.svg",
         )
 
-    def render(self, ctx):
-        dataset = ctx.dataset
-        panel = types.Object()
-        lines = []
+    # ── State ─────────────────────────────────────────────────────────────────
 
-        # ── Collect metrics ───────────────────────────────────────────────────
-        form_scores = []
-        posture_scores = []
-        rep_counts = []
-        grades = []
-        error_count = 0
+    def on_load(self, ctx):
+        try:
+            logger.info("on_load — dataset=%s", ctx.dataset.name)
+            self._refresh_state(ctx)
+        except Exception as exc:
+            logger.exception("on_load failed: %s", exc)
 
-        exercise_scores = defaultdict(list)
-        issue_labels = []
-        issue_severities = []          # flat list of severity strings
-        severity_by_issue = defaultdict(list)  # issue_label -> [severities]
-        all_strengths = []
-        all_priority_fixes = []
-        all_coaching_summaries = []    # (filename, score, grade, summary)
+    def on_change_dataset(self, ctx):
+        try:
+            logger.info("on_change_dataset — dataset=%s", ctx.dataset.name)
+            self._refresh_state(ctx)
+        except Exception as exc:
+            logger.exception("on_change_dataset failed: %s", exc)
 
-        for sample in dataset.iter_samples():
-            grade = sample.get_field("form_grade")
-            if grade == "ERROR":
-                error_count += 1
-                continue
-
-            score = sample.get_field("form_score")
-            ps    = sample.get_field("posture_score")
-            reps  = sample.get_field("rep_count")
-
-            if score is not None:
-                form_scores.append(float(score))
-            if ps is not None:
-                posture_scores.append(float(ps))
-            if reps is not None:
-                rep_counts.append(int(reps))
-            if grade and grade != "ERROR":
-                grades.append(grade)
-
-            exercise = sample.get_field("exercise_detected")
-            if exercise and score is not None:
-                exercise_scores[exercise].append(float(score))
-
-            form_issues = sample.get_field("form_issues")
-            if form_issues and hasattr(form_issues, "detections"):
-                for det in form_issues.detections:
-                    if det.label:
-                        label = det.label
-                        sev   = det.get_field("severity") or "minor"
-                        issue_labels.append(label)
-                        issue_severities.append(sev)
-                        severity_by_issue[label].append(sev)
-
-            strengths = sample.get_field("strengths")
-            if strengths and isinstance(strengths, list):
-                all_strengths.extend(strengths)
-
-            fix = sample.get_field("top_priority_fix")
-            if fix:
-                all_priority_fixes.append(str(fix))
-
-            summary = sample.get_field("coaching_summary")
-            filename = (sample.filepath or "").split("/")[-1].split("\\")[-1]
-            if summary and score is not None and grade:
-                all_coaching_summaries.append((filename, float(score), str(grade), str(summary)))
-
-        total = len(form_scores)
-
-        # ── Header ────────────────────────────────────────────────────────────
-        lines.append("# RepImprov — AI Workout Form Analyzer")
-        lines.append(
-            "_Powered by TwelveLabs Pegasus 1.2 · "
-            "Video Understanding AI Hackathon · Northeastern University_"
-        )
-        lines.append("")
-
-        if total == 0:
-            lines.append("---")
-            lines.append(
-                "**No analyzed samples yet.**  "
-                "Run `RepImprov: Analyze Workout Form` from the Operator Browser "
-                "(press `` ` ``) to get started."
+    def _refresh_state(self, ctx):
+        try:
+            cats       = _collect_categories(ctx.dataset)
+            total_vids = sum(c["total"]    for c in cats)
+            total_done = sum(c["analyzed"] for c in cats)
+            ctx.panel.set_state("cats",       cats)
+            ctx.panel.set_state("total_vids", total_vids)
+            ctx.panel.set_state("total_done", total_done)
+            logger.info(
+                "_refresh_state: %d categories — %d/%d analyzed",
+                len(cats), total_done, total_vids,
             )
-            if error_count:
-                lines.append(f"> {error_count} sample(s) failed to process.")
-            panel.str("content", label="", default="\n".join(lines), view=types.MarkdownView())
+        except Exception as exc:
+            logger.exception("_refresh_state failed: %s", exc)
+
+    # ── Filter actions ────────────────────────────────────────────────────────
+
+    def on_show_all(self, ctx):
+        try:
+            logger.info("on_show_all")
+            ctx.ops.set_view(ctx.dataset.view())
+        except Exception as exc:
+            logger.exception("on_show_all failed: %s", exc)
+
+    def on_show_analyzed(self, ctx):
+        try:
+            logger.info("on_show_analyzed")
+            schema = ctx.dataset.get_field_schema()
+            if "form_score" not in schema:
+                logger.warning("on_show_analyzed: form_score not in schema yet")
+                ctx.ops.set_view(ctx.dataset.limit(0))
+                return
+            paths  = ctx.dataset.values("filepath")   or []
+            scores = ctx.dataset.values("form_score") or []
+            matching = [p for i, p in enumerate(paths) if i < len(scores) and scores[i] is not None]
+            logger.info("on_show_analyzed: %d matches", len(matching))
+            ctx.ops.set_view(ctx.dataset.select_by("filepath", matching) if matching else ctx.dataset.limit(0))
+        except Exception as exc:
+            logger.exception("on_show_analyzed failed: %s", exc)
+
+    def on_show_unanalyzed(self, ctx):
+        try:
+            logger.info("on_show_unanalyzed")
+            schema = ctx.dataset.get_field_schema()
+            paths  = ctx.dataset.values("filepath")                                    or []
+            scores = ctx.dataset.values("form_score") if "form_score" in schema else []
+            matching = [p for i, p in enumerate(paths) if i >= len(scores) or scores[i] is None]
+            logger.info("on_show_unanalyzed: %d matches", len(matching))
+            ctx.ops.set_view(ctx.dataset.select_by("filepath", matching) if matching else ctx.dataset.limit(0))
+        except Exception as exc:
+            logger.exception("on_show_unanalyzed failed: %s", exc)
+
+    def on_open_category(self, ctx):
+        try:
+            raw = ctx.params.get("raw", "")
+            if not raw:
+                logger.warning("on_open_category: empty raw param")
+                return
+            logger.info("on_open_category: raw=%r", raw)
+            view = _select_by_folder(ctx.dataset, raw)
+            logger.info("on_open_category: view has %d samples", len(view))
+            ctx.ops.set_view(view)
+        except Exception as exc:
+            logger.exception("on_open_category failed (raw=%r): %s", ctx.params.get("raw"), exc)
+
+    def on_refresh(self, ctx):
+        try:
+            logger.info("on_refresh")
+            self._refresh_state(ctx)
+        except Exception as exc:
+            logger.exception("on_refresh failed: %s", exc)
+
+    # ── Render ────────────────────────────────────────────────────────────────
+
+    def render(self, ctx):
+        panel = types.Object()
+        try:
+            return self._render_content(ctx, panel)
+        except Exception as exc:
+            logger.exception("render failed: %s", exc)
+            panel.str(
+                "render_error", label="",
+                default=f"# RepImprov Dashboard\n\n**Render error:** {exc}\n\nCheck server logs.",
+                view=types.MarkdownView(read_only=True),
+            )
             return types.Property(panel)
 
-        # ── Overview stats ────────────────────────────────────────────────────
-        avg_form    = sum(form_scores) / total
-        avg_posture = sum(posture_scores) / len(posture_scores) if posture_scores else 0.0
-        avg_reps    = sum(rep_counts) / len(rep_counts) if rep_counts else 0.0
-        critical_count  = issue_severities.count("critical")
-        moderate_count  = issue_severities.count("moderate")
-        minor_count     = issue_severities.count("minor")
-        total_issues    = len(issue_labels)
+    def _render_content(self, ctx, panel):
+        cats       = ctx.panel.state.get("cats", [])
+        total_vids = ctx.panel.state.get("total_vids", 0)
+        total_done = ctx.panel.state.get("total_done", 0)
+        pending    = total_vids - total_done
 
-        lines.append("## Overview")
-        lines.append("")
-        lines.append(f"| Metric | Value |")
-        lines.append(f"|--------|-------|")
-        lines.append(f"| Videos analyzed | **{total}** |")
-        lines.append(f"| Avg form score  | **{avg_form:.1f} / 100** — {_score_label(avg_form)} |")
-        lines.append(f"| Avg posture score | **{avg_posture:.1f} / 100** |")
-        lines.append(f"| Avg reps per video | **{avg_reps:.1f}** |")
-        lines.append(f"| Total issues flagged | **{total_issues}** ({critical_count} critical, {moderate_count} moderate, {minor_count} minor) |")
-        if error_count:
-            lines.append(f"| Processing errors | {error_count} |")
-        lines.append("")
-
-        # ── Form score bar ────────────────────────────────────────────────────
-        lines.append("### Avg Form Score")
-        lines.append(
-            f"`{_bar(avg_form, 100)}`  **{avg_form:.1f}**"
-        )
-        lines.append("")
-
-        # ── Grade distribution ────────────────────────────────────────────────
-        lines.append("## Grade Distribution")
-        lines.append("")
-        grade_counts = Counter(grades)
-        grade_total  = sum(grade_counts.values()) or 1
-        for g in ["A", "B", "C", "D", "F"]:
-            count = grade_counts.get(g, 0)
-            pct   = count / grade_total * 100
-            lines.append(
-                f"**{g}**  `{_bar(count, grade_total)}`  {count} video(s)  ({pct:.0f}%)"
-            )
-        lines.append("")
-
-        # ── Per-exercise breakdown ────────────────────────────────────────────
-        lines.append("## Per-Exercise Form Score")
-        lines.append("")
-        if exercise_scores:
-            max_avg = max(
-                sum(s) / len(s) for s in exercise_scores.values()
-            )
-            lines.append("| Exercise | Avg Score | Videos | Rating |")
-            lines.append("|----------|-----------|--------|--------|")
-            for ex, scores in sorted(exercise_scores.items()):
-                avg  = sum(scores) / len(scores)
-                name = ex.replace("_", " ").title()
-                bar  = _bar(avg, 100, width=12)
-                lines.append(
-                    f"| {name} | `{bar}` {avg:.1f} | {len(scores)} | {_score_label(avg)} |"
-                )
-        else:
-            lines.append("_No exercise data available._")
-        lines.append("")
-
-        # ── Issue severity breakdown ──────────────────────────────────────────
-        lines.append("## Form Issues by Severity")
-        lines.append("")
-        if total_issues:
-            sev_data = [
-                ("Critical", critical_count, "Injury risk — fix immediately"),
-                ("Moderate", moderate_count, "Performance loss — address soon"),
-                ("Minor",    minor_count,    "Refinement — good to improve"),
-            ]
-            lines.append("| Severity | Count | Bar | Meaning |")
-            lines.append("|----------|-------|-----|---------|")
-            for label, count, meaning in sev_data:
-                bar = _bar(count, total_issues, width=12)
-                lines.append(f"| **{label}** | {count} | `{bar}` | {meaning} |")
-            lines.append("")
-
-            # Top 5 issues with their dominant severity
-            lines.append("### Top 5 Most Flagged Issues")
-            lines.append("")
-            issue_counts = Counter(issue_labels)
-            lines.append("| Rank | Issue | Count | Dominant Severity |")
-            lines.append("|------|-------|-------|-------------------|")
-            for rank, (issue, count) in enumerate(issue_counts.most_common(5), 1):
-                display  = issue.replace("_", " ").title()
-                sevs     = severity_by_issue[issue]
-                dominant = Counter(sevs).most_common(1)[0][0].title()
-                lines.append(f"| {rank} | {display} | {count} | {dominant} |")
-        else:
-            lines.append("_No form issues recorded. Great technique across the board!_")
-        lines.append("")
-
-        # ── Strengths ─────────────────────────────────────────────────────────
-        lines.append("## Most Common Strengths")
-        lines.append("")
-        if all_strengths:
-            strength_counts = Counter(all_strengths)
-            max_s = strength_counts.most_common(1)[0][1]
-            for strength, count in strength_counts.most_common(5):
-                bar = _bar(count, max_s, width=10)
-                lines.append(f"- `{bar}` **{strength}** ({count}x)")
-        else:
-            lines.append("_No strengths data yet._")
-        lines.append("")
-
-        # ── Priority fix spotlight ────────────────────────────────────────────
-        if all_priority_fixes:
-            lines.append("## Most Recommended Fixes")
-            lines.append("")
-            fix_counts = Counter(all_priority_fixes)
-            for fix, count in fix_counts.most_common(3):
-                lines.append(f"> **#{list(fix_counts.keys()).index(fix) + 1}** ({count}x)  {fix}")
-            lines.append("")
-
-        # ── Needs attention ───────────────────────────────────────────────────
-        low_performers = sorted(
-            all_coaching_summaries, key=lambda x: x[1]
-        )[:3]
-
-        if low_performers:
-            lines.append("## Needs Attention")
-            lines.append(
-                "_Videos with the lowest form scores — prioritize coaching here._"
-            )
-            lines.append("")
-            for filename, score, grade, summary in low_performers:
-                lines.append(f"**{filename}** — Grade **{grade}** ({score:.0f}/100)")
-                lines.append(f"> {summary}")
-                lines.append("")
-
-        # ── Top performers ────────────────────────────────────────────────────
-        top_performers = sorted(
-            all_coaching_summaries, key=lambda x: x[1], reverse=True
-        )[:3]
-
-        if top_performers:
-            lines.append("## Top Performers")
-            lines.append(
-                "_Videos with the highest form scores._"
-            )
-            lines.append("")
-            for filename, score, grade, summary in top_performers:
-                lines.append(f"**{filename}** — Grade **{grade}** ({score:.0f}/100)")
-                lines.append(f"> {summary}")
-                lines.append("")
-
-        # ── Footer ────────────────────────────────────────────────────────────
-        lines.append("---")
-        lines.append(
-            "_RepImprov · TwelveLabs Pegasus 1.2 · FiftyOne Plugin · "
-            "Video Understanding AI Hackathon 2025_"
-        )
-
+        # ── Header ────────────────────────────────────────────────────────────
         panel.str(
-            "content",
-            label="",
-            default="\n".join(lines),
-            view=types.MarkdownView(),
+            "header", label="",
+            default="\n".join([
+                "# RepImprov  AI Workout Form Analyzer",
+                "**Team:** Hiroaki Okumura · Hutch Turner · Laxmi Balcha · Ethan Lee",
+                f"**{total_done}** analyzed · **{pending}** pending · **{total_vids}** total",
+                "---",
+                "*Click any category to load those videos in the grid, then click a video to preview it.*",
+            ]),
+            view=types.MarkdownView(read_only=True),
         )
+
+        # ── Quick filters ─────────────────────────────────────────────────────
+        panel.str(
+            "qf_label", label="",
+            default="### Quick Filters",
+            view=types.MarkdownView(read_only=True),
+        )
+        panel.btn("show_all",        label=f"All Videos ({total_vids})", on_click=self.on_show_all)
+        panel.btn("show_analyzed",   label=f"Analyzed ({total_done})",   on_click=self.on_show_analyzed)
+        panel.btn("show_unanalyzed", label=f"Not Analyzed ({pending})",  on_click=self.on_show_unanalyzed)
+
+        panel.str("div1", label="", default="---", view=types.MarkdownView(read_only=True))
+
+        # ── Category list ─────────────────────────────────────────────────────
+        panel.str(
+            "cat_label", label="",
+            default=f"### Exercise Categories  ({len(cats)})",
+            view=types.MarkdownView(read_only=True),
+        )
+
+        for cat in cats:
+            raw      = cat["raw"]
+            display  = cat["display"]
+            total    = cat["total"]
+            analyzed = cat["analyzed"]
+            pending_cat = cat["pending"]
+
+            if analyzed == 0:
+                status = f"{total} videos  ·  not analyzed"
+            elif pending_cat == 0:
+                status = f"{total} videos  ·  all analyzed"
+            else:
+                status = f"{total} videos  ·  {analyzed} analyzed  ·  {pending_cat} pending"
+
+            safe_key = "cat_" + re.sub(r"[^a-z0-9]", "_", raw.lower())
+            panel.btn(
+                safe_key,
+                label=f"{display}  —  {status}",
+                on_click=self.on_open_category,
+                params={"raw": raw},
+            )
+
+        panel.str("div2", label="", default="---", view=types.MarkdownView(read_only=True))
+        panel.btn("refresh", label="Refresh", on_click=self.on_refresh)
 
         return types.Property(panel)
 

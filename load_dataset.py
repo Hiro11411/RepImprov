@@ -1,5 +1,5 @@
 """
-Phase 1 — Dataset तैयारी for RepImprov
+Phase 1 — Dataset for RepImprov
 
 Loads workout videos into FiftyOne, computes metadata,
 initializes all required fields, and launches the app.
@@ -8,7 +8,6 @@ initializes all required fields, and launches the app.
 import fiftyone as fo
 from operator import eq
 
-# 🔁 CHANGE THIS PATH
 VIDEO_DIR = "workout_videos"   # or absolute path
 
 DATASET_NAME = "repimprov_dataset"
@@ -34,9 +33,9 @@ def main():
     dataset.compute_metadata(overwrite=False)
 
     # ── Add required fields (safe if rerun) ─────────────────────────────────
-    def ensure_field(name, field_type, **kwargs):
+    def ensure_field(name, field_type, kwargs):
         if name not in dataset.get_field_schema():
-            dataset.add_sample_field(name, field_type, **kwargs)
+            dataset.add_sample_field(name, field_type, kwargs)
 
     # Core outputs (matches your operator.py exactly)
     ensure_field("exercise_detected", fo.StringField)
@@ -49,8 +48,6 @@ def main():
 
     # Lists
     ensure_field("strengths", fo.ListField, subfield=fo.StringField)
-
-    # Label types
     ensure_field(
         "form_classification",
         fo.EmbeddedDocumentField,
@@ -83,5 +80,5 @@ def main():
     session.wait()
 
 
-if __name__ == "__main__":
+if name == "main":
     main()
