@@ -1,5 +1,5 @@
 """
-RepImprov — AI-powered workout form analyzer
+RepImprov - AI-powered workout form analyzer
 FiftyOne plugin using TwelveLabs Pegasus 1.2
 """
 
