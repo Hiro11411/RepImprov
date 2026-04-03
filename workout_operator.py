@@ -120,35 +120,33 @@ class AnalyzeWorkoutForm(foo.Operator):
             try:
                 # ── Upload ────────────────────────────────────────────────────
                 logger.debug("Uploading %s …", filepath)
-                task = client.task.create(index_id=index.id, file=filepath)
+                task = client.tasks.create(index_id=index.id, video_file=filepath)
                 logger.info("Task created: id=%s for sample %s", task.id, sample.id)
 
-                task.wait_for_done(sleep_interval=5)
-                logger.info("Task %s finished with status=%s", task.id, task.status)
+                done = client.tasks.wait_for_done(task_id=task.id, sleep_interval=5)
+                logger.info("Task %s finished with status=%s", task.id, done.status)
 
-                if task.status != "ready":
+                if done.status != "ready":
                     logger.error(
                         "Task %s not ready (status=%s) — marking sample %s as ERROR",
-                        task.id, task.status, sample.id,
+                        task.id, done.status, sample.id,
                     )
                     sample["form_grade"] = "ERROR"
                     errors += 1
                     continue
 
-                video_id   = task.video_id
+                video_id   = done.video_id
                 frame_rate = getattr(sample.metadata, "frame_rate", None) or 30.0
                 logger.debug("video_id=%s frame_rate=%.1f", video_id, frame_rate)
 
                 # ── Prompt A: overall form assessment ─────────────────────────
                 logger.debug("Running Prompt A (form assessment) for video %s", video_id)
                 try:
-                    raw_a = client.generate.text(
+                    raw_a = client.analyze(
                         video_id=video_id,
                         prompt=FORM_ASSESSMENT_PROMPT.format(
                             exercise_type=exercise_type, sensitivity=sensitivity
                         ),
-                        model_name=PEGASUS_MODEL,
-                        modalities=["visual", "audio"],
                     ).data
                     logger.debug("Prompt A raw response (first 200): %s", str(raw_a)[:200])
                 except Exception as exc:
@@ -169,13 +167,11 @@ class AnalyzeWorkoutForm(foo.Operator):
                 # ── Prompt B: posture & issue detection ───────────────────────
                 logger.debug("Running Prompt B (posture analysis) for video %s", video_id)
                 try:
-                    raw_b = client.generate.text(
+                    raw_b = client.analyze(
                         video_id=video_id,
                         prompt=POSTURE_ANALYSIS_PROMPT.format(
                             exercise_type=exercise_detected, sensitivity=sensitivity
                         ),
-                        model_name=PEGASUS_MODEL,
-                        modalities=["visual", "audio"],
                     ).data
                     logger.debug("Prompt B raw response (first 200): %s", str(raw_b)[:200])
                 except Exception as exc:
@@ -205,13 +201,11 @@ class AnalyzeWorkoutForm(foo.Operator):
                 # ── Prompt C: strengths ───────────────────────────────────────
                 logger.debug("Running Prompt C (strengths) for video %s", video_id)
                 try:
-                    raw_c = client.generate.text(
+                    raw_c = client.analyze(
                         video_id=video_id,
                         prompt=STRENGTHS_PROMPT.format(
                             exercise_type=exercise_detected, sensitivity=sensitivity
                         ),
-                        model_name=PEGASUS_MODEL,
-                        modalities=["visual", "audio"],
                     ).data
                     logger.debug("Prompt C raw response (first 200): %s", str(raw_c)[:200])
                 except Exception as exc:

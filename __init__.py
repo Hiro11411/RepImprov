@@ -1,13 +1,20 @@
+"""
+RepImprov — AI-powered workout form analyzer
+FiftyOne plugin using TwelveLabs Pegasus 1.2
+"""
+
 import logging
+
 logger = logging.getLogger(__name__)
+
 
 def register(plugin):
     logger.info("RepImprov: starting registration")
-    
+
     from .workout_operator import AnalyzeWorkoutForm
     plugin.register(AnalyzeWorkoutForm)
     logger.info("RepImprov: operator registered")
-    
+
     try:
         from .panel import RepImprovDashboard
         plugin.register(RepImprovDashboard)
