@@ -15,7 +15,10 @@ from dotenv import load_dotenv
 
 from twelvelabs import TwelveLabs
 
-from .prompts import FORM_ASSESSMENT_PROMPT, POSTURE_ANALYSIS_PROMPT, STRENGTHS_PROMPT
+from .prompts import (
+    FORM_ASSESSMENT_PROMPT, POSTURE_ANALYSIS_PROMPT, STRENGTHS_PROMPT,
+    _AUTO_EXERCISE_CONTEXT, confirmed_exercise_context,
+)
 from .utils import parse_pegasus_response, compute_posture_score, frames_from_timestamp
 
 # Load .env from the plugin directory — works regardless of where run.py is called from
@@ -108,6 +111,8 @@ class AnalyzeWorkoutForm(foo.Operator):
 
         processed = 0
         errors    = 0
+        schema    = ctx.dataset.get_field_schema()
+        has_score_field = "form_score" in schema
 
         for sample in ctx.dataset.iter_samples(autosave=True, progress=True):
             filepath = sample.filepath
@@ -115,12 +120,27 @@ class AnalyzeWorkoutForm(foo.Operator):
                 logger.warning("Sample %s has no filepath — skipping", sample.id)
                 continue
 
+            # Skip already-analyzed samples to avoid wasting API quota.
+            # BUT re-analyze if score=50 + grade=C — that is the parse-failure default,
+            # meaning Prompt A silently failed and never wrote a real result.
+            if has_score_field:
+                existing_score = sample.get_field("form_score")
+                existing_grade = sample.get_field("form_grade") if "form_grade" in schema else None
+                is_default_fail = (existing_score == 50.0 and existing_grade == "C")
+                if existing_score is not None and not is_default_fail:
+                    logger.debug("Sample %s already analyzed (score=%.1f) — skipping", sample.id, existing_score)
+                    processed += 1
+                    continue
+                if is_default_fail:
+                    logger.info("Sample %s has default score=50/C — re-analyzing", sample.id)
+
             logger.info("Processing sample %s: %s", sample.id, filepath)
 
             try:
                 # ── Upload ────────────────────────────────────────────────────
                 logger.debug("Uploading %s …", filepath)
-                task = client.tasks.create(index_id=index.id, video_file=filepath)
+                with open(filepath, "rb") as _vf:
+                    task = client.tasks.create(index_id=index.id, video_file=_vf)
                 logger.info("Task created: id=%s for sample %s", task.id, sample.id)
 
                 done = client.tasks.wait_for_done(task_id=task.id, sleep_interval=5)
@@ -141,11 +161,15 @@ class AnalyzeWorkoutForm(foo.Operator):
 
                 # ── Prompt A: overall form assessment ─────────────────────────
                 logger.debug("Running Prompt A (form assessment) for video %s", video_id)
+                exercise_context = (
+                    _AUTO_EXERCISE_CONTEXT if exercise_type == "auto"
+                    else confirmed_exercise_context(exercise_type)
+                )
                 try:
                     raw_a = client.analyze(
                         video_id=video_id,
                         prompt=FORM_ASSESSMENT_PROMPT.format(
-                            exercise_type=exercise_type, sensitivity=sensitivity
+                            exercise_context=exercise_context, sensitivity=sensitivity
                         ),
                     ).data
                     logger.debug("Prompt A raw response (first 200): %s", str(raw_a)[:200])
@@ -159,9 +183,10 @@ class AnalyzeWorkoutForm(foo.Operator):
                 rep_count         = int(data_a.get("rep_count", 0))
                 exercise_detected = str(data_a.get("exercise_detected", exercise_type))
                 verdict           = str(data_a.get("verdict", "Analysis complete"))
+                confidence        = float(data_a.get("confidence", 100))
                 logger.info(
-                    "Prompt A result — score=%.1f grade=%s reps=%d exercise=%s",
-                    form_score, form_grade, rep_count, exercise_detected,
+                    "Prompt A result — score=%.1f grade=%s reps=%d exercise=%s confidence=%.0f",
+                    form_score, form_grade, rep_count, exercise_detected, confidence,
                 )
 
                 # ── Prompt B: posture & issue detection ───────────────────────
@@ -213,13 +238,44 @@ class AnalyzeWorkoutForm(foo.Operator):
                     raw_c = ""
 
                 data_c           = parse_pegasus_response(raw_c)
-                strengths        = data_c.get("strengths", [])
+                raw_strengths    = data_c.get("strengths", [])
                 top_priority_fix = str(data_c.get("top_priority_fix", ""))
                 coaching_summary = str(data_c.get("coaching_summary", ""))
+
+                # Parse strengths — new format is list of dicts with timestamps,
+                # old format was list of strings; handle both gracefully
+                strength_texts       = []
+                highlight_detections = []
+                for s in (raw_strengths if isinstance(raw_strengths, list) else []):
+                    try:
+                        if isinstance(s, dict):
+                            ts      = float(s.get("timestamp_seconds", 0.0))
+                            label   = str(s.get("label", "good_form")).replace(" ", "_")
+                            desc    = str(s.get("description", label))
+                            support = frames_from_timestamp(ts, frame_rate)
+                            det     = fo.TemporalDetection(label=label, support=support)
+                            det["description"] = desc
+                            det["type"]        = "strength"
+                            highlight_detections.append(det)
+                            strength_texts.append(desc)
+                        else:
+                            # plain string fallback
+                            strength_texts.append(str(s))
+                    except Exception as exc:
+                        logger.warning("Skipping malformed strength %s: %s", s, exc)
+
                 logger.info(
-                    "Prompt C result — %d strengths, fix=%r",
-                    len(strengths), top_priority_fix[:80],
+                    "Prompt C result — %d strengths (%d with timestamps), fix=%r",
+                    len(strength_texts), len(highlight_detections), top_priority_fix[:60],
                 )
+
+                # ── Derive extra labels ───────────────────────────────────────
+                severity_rank = {"critical": 3, "moderate": 2, "minor": 1}
+                worst = max(
+                    (issue.get("severity", "minor") for issue in issues),
+                    key=lambda s: severity_rank.get(str(s).lower(), 0),
+                    default="clean",
+                ) if issues else "clean"
 
                 # ── Write labels back ─────────────────────────────────────────
                 sample["exercise_detected"] = exercise_detected
@@ -228,20 +284,41 @@ class AnalyzeWorkoutForm(foo.Operator):
                 sample["form_grade"]        = form_grade
                 sample["posture_score"]     = posture_score
                 sample["top_priority_fix"]  = top_priority_fix
-                sample["strengths"]         = strengths if isinstance(strengths, list) else list(strengths)
                 sample["coaching_summary"]  = coaching_summary
+                sample["strengths"]         = strength_texts
+
+                # ── FiftyOne Classification labels (colored tags in grid) ──────
                 sample["form_classification"] = fo.Classification(
                     label=verdict,
                     confidence=form_score / 100.0,
                 )
+                sample["grade_label"] = fo.Classification(
+                    label=form_grade,
+                    confidence=form_score / 100.0,
+                )
+                sample["exercise_label"] = fo.Classification(
+                    label=exercise_detected,
+                    confidence=confidence / 100.0,
+                )
+                sample["worst_issue_severity"] = fo.Classification(
+                    label=worst,
+                )
+
+                # ── TemporalDetections — bad form (red) ───────────────────────
                 sample["form_issues"] = fo.TemporalDetections(
                     detections=temporal_detections
                 )
 
+                # ── TemporalDetections — good form highlights (green) ─────────
+                sample["form_highlights"] = fo.TemporalDetections(
+                    detections=highlight_detections
+                )
+
                 processed += 1
                 logger.info(
-                    "Sample %s done — %s score=%.1f grade=%s issues=%d",
-                    sample.id, exercise_detected, form_score, form_grade, len(issues),
+                    "Sample %s done — %s score=%.1f grade=%s issues=%d highlights=%d",
+                    sample.id, exercise_detected, form_score, form_grade,
+                    len(temporal_detections), len(highlight_detections),
                 )
 
             except Exception as exc:

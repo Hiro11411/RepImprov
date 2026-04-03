@@ -225,8 +225,8 @@ STRENGTHS_PROMPT = """You are an expert strength and conditioning coach analyzin
 
 Sensitivity level: {sensitivity}
 
-Watch the full video and identify specific things the athlete does well.
-Only report strengths you actually observed — be specific, not generic.
+Watch the full video and identify specific moments where the athlete executes well.
+Only report strengths you can point to at a specific timestamp — be precise, not generic.
 
 Exercise-specific positives to look for:
 - squat: consistent depth, neutral spine, controlled descent, knees tracking toes, braced core, even tempo
@@ -237,11 +237,15 @@ Exercise-specific positives to look for:
 - pull_up: full lockout at bottom, chin clearly over bar, controlled descent, engaged scapulae
 - crunch: controlled tempo, hands not pulling neck, lower back staying grounded, full contraction at top
 
-Provide:
-1. strengths: 2-5 specific things the athlete does well — reference what you saw, not generic praise
-2. top_priority_fix: the single most important correction that would have the biggest impact (one sentence)
-3. coaching_summary: 2-3 sentences of encouraging but honest coaching — acknowledge what is working and give clear direction
+For each strength, provide:
+- timestamp_seconds: the exact moment it is most visible (float)
+- label: short snake_case name (e.g. "good_depth", "neutral_spine", "controlled_tempo")
+- description: one specific sentence describing what the athlete does well at that moment
+
+Also provide:
+- top_priority_fix: the single most important correction (one sentence)
+- coaching_summary: 2-3 sentences of encouraging but honest coaching
 
 Output ONLY valid JSON with no markdown backticks:
-{{"strengths": ["<specific observed strength>", "<specific observed strength>"], "top_priority_fix": "<most impactful correction>", "coaching_summary": "<2-3 sentences of specific coaching feedback>"}}
+{{"strengths": [{{"timestamp_seconds": 1.5, "label": "<strength_name>", "description": "<what you saw>"}}], "top_priority_fix": "<most impactful correction>", "coaching_summary": "<2-3 sentences>"}}
 """
