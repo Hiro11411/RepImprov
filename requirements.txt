@@ -1,0 +1,3 @@
+fiftyone>=0.21
+twelvelabs>=0.3
+python-dotenv

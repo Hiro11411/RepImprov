@@ -1,0 +1,10 @@
+name: "@yourname/repimprov"
+version: "1.0.0"
+label: "RepImprov"
+description: "AI-powered workout form analyzer using TwelveLabs Pegasus"
+operators:
+  - analyze_workout_form
+panels:
+  - repimprov_dashboard
+secrets:
+  - TWELVELABS_API_KEY
