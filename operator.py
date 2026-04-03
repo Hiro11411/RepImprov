@@ -13,6 +13,9 @@ import fiftyone.operators.types as types
 import fiftyone as fo
 from dotenv import load_dotenv
 
+from twelvelabs import TwelveLabs
+from twelvelabs.models.task import Task
+
 from .prompts import FORM_ASSESSMENT_PROMPT, POSTURE_ANALYSIS_PROMPT, STRENGTHS_PROMPT
 from .utils import parse_pegasus_response, compute_posture_score, frames_from_timestamp
 
@@ -73,8 +76,6 @@ class AnalyzeWorkoutForm(foo.Operator):
         return types.Property(inputs)
 
     def execute(self, ctx):
-        from twelvelabs import TwelveLabs
-        from twelvelabs.models.task import Task
 
         api_key = ctx.params.get("api_key") or os.getenv("TWELVELABS_API_KEY", "")
         exercise_type = ctx.params.get("exercise_type", "auto")
