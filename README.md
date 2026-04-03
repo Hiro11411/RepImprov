@@ -7,3 +7,5 @@ Team Members: Hiroaki Okumura, Hutch Turner, Laxmi Balcha, Ethan Lee
 Video Understanding AI Hackathon at Northeastern University
 
 Built on FiftyOne × TwelveLabs Pegasus
+
+Dataset: https://www.kaggle.com/datasets/hasyimabdillah/workoutfitness-video
