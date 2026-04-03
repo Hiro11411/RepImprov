@@ -114,7 +114,7 @@ class AnalyzeWorkoutForm(foo.Operator):
         schema    = ctx.dataset.get_field_schema()
         has_score_field = "form_score" in schema
 
-        for sample in ctx.dataset.iter_samples(autosave=True, progress=True):
+        for sample in ctx.dataset.iter_samples(autosave=True, progress=False):
             filepath = sample.filepath
             if not filepath:
                 logger.warning("Sample %s has no filepath — skipping", sample.id)
