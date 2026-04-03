@@ -98,9 +98,12 @@ class AnalyzeWorkoutForm(foo.Operator):
         try:
             client = TwelveLabs(api_key=api_key)
             logger.info("TwelveLabs client initialised")
+            # Quick connectivity check — will raise if API key is bad or no connection
+            list(client.indexes.list(page_limit=1))
+            logger.info("TwelveLabs API reachable")
         except Exception as exc:
-            logger.exception("Failed to initialise TwelveLabs client: %s", exc)
-            return {"message": f"ERROR: TwelveLabs client failed — {exc}", "processed": 0, "errors": 0}
+            logger.exception("TwelveLabs API unreachable: %s", exc)
+            return {"message": f"ERROR: TwelveLabs API check failed — {exc}", "processed": 0, "errors": 0}
 
         try:
             index = _get_or_create_index(client, "repimprov_analysis")
@@ -109,9 +112,10 @@ class AnalyzeWorkoutForm(foo.Operator):
             logger.exception("Failed to get/create TwelveLabs index: %s", exc)
             return {"message": f"ERROR: Index setup failed — {exc}", "processed": 0, "errors": 0}
 
-        processed = 0
-        errors    = 0
-        schema    = ctx.dataset.get_field_schema()
+        processed   = 0
+        errors      = 0
+        first_error = ""
+        schema      = ctx.dataset.get_field_schema()
         has_score_field = "form_score" in schema
 
         for sample in ctx.dataset.iter_samples(autosave=True, progress=False):
@@ -147,11 +151,14 @@ class AnalyzeWorkoutForm(foo.Operator):
                 logger.info("Task %s finished with status=%s", task.id, done.status)
 
                 if done.status != "ready":
+                    msg = f"Task {task.id} status={done.status} for {os.path.basename(filepath)}"
                     logger.error(
                         "Task %s not ready (status=%s) — marking sample %s as ERROR",
                         task.id, done.status, sample.id,
                     )
                     sample["form_grade"] = "ERROR"
+                    if not first_error:
+                        first_error = msg
                     errors += 1
                     continue
 
@@ -324,15 +331,18 @@ class AnalyzeWorkoutForm(foo.Operator):
             except Exception as exc:
                 logger.exception("Unhandled error for sample %s (%s): %s", sample.id, filepath, exc)
                 sample["form_grade"] = "ERROR"
+                if not first_error:
+                    first_error = f"{type(exc).__name__}: {exc}"
                 errors += 1
 
         logger.info(
             "analyze_workout_form complete — processed=%d errors=%d", processed, errors
         )
+        error_detail = f" First error: {first_error}" if first_error else ""
         return {
             "message": (
                 f"RepImprov complete! Analyzed {processed} video(s). "
-                f"{errors} error(s) encountered."
+                f"{errors} error(s) encountered.{error_detail}"
             ),
             "processed": processed,
             "errors":    errors,
