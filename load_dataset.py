@@ -1,29 +1,30 @@
 """
-Phase 1 — Dataset तैयारी for RepImprov
+Phase 1 — Dataset for RepImprov
 
 Loads workout videos into FiftyOne, computes metadata,
-initializes all required fields, and launches the app.
+re-encodes unsupported videos, initializes all required fields,
+and launches the app.
 """
 
 import fiftyone as fo
-from operator import eq
+import fiftyone.utils.video as fouv
 
 # 🔁 CHANGE THIS PATH
 VIDEO_DIR = "workout_videos"   # or absolute path
-
 DATASET_NAME = "repimprov_dataset"
 
 
 def main():
-    """
-    I cooked.
-    """
     # ── Create or load dataset ──────────────────────────────────────────────
     if DATASET_NAME in fo.list_datasets():
-        print(f"Loading existing dataset: {DATASET_NAME}")
-        dataset = fo.load_dataset(DATASET_NAME)
-    else:
+        fo.delete_dataset("repimprov_dataset")
+        print("Dataset deleted")
         print(f"Creating dataset from: {VIDEO_DIR}")
+        dataset = fo.Dataset.from_videos_dir(
+            VIDEO_DIR,
+            name=DATASET_NAME,
+        )
+    else:
         dataset = fo.Dataset.from_videos_dir(
             VIDEO_DIR,
             name=DATASET_NAME,
@@ -38,7 +39,7 @@ def main():
         if name not in dataset.get_field_schema():
             dataset.add_sample_field(name, field_type, **kwargs)
 
-    # Core outputs (matches your operator.py exactly)
+    # Core outputs
     ensure_field("exercise_detected", fo.StringField)
     ensure_field("rep_count", fo.IntField)
     ensure_field("form_score", fo.FloatField)
