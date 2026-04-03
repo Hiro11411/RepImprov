@@ -18,7 +18,9 @@ from twelvelabs import TwelveLabs
 from .prompts import FORM_ASSESSMENT_PROMPT, POSTURE_ANALYSIS_PROMPT, STRENGTHS_PROMPT
 from .utils import parse_pegasus_response, compute_posture_score, frames_from_timestamp
 
-load_dotenv()
+# Load .env from the plugin directory — works regardless of where run.py is called from
+_PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(_PLUGIN_DIR, ".env"))
 
 logger = logging.getLogger(__name__)
 
@@ -84,24 +86,25 @@ class AnalyzeWorkoutForm(foo.Operator):
             "analyze_workout_form started — exercise=%s sensitivity=%s dataset=%s",
             exercise_type, sensitivity, ctx.dataset.name,
         )
+        logger.info("API key present: %s", bool(api_key))
 
         if not api_key:
             logger.error("No TwelveLabs API key provided")
-            return {"error": "No TwelveLabs API key provided. Set TWELVELABS_API_KEY in your .env file."}
+            return {"message": "ERROR: No TwelveLabs API key. Set TWELVELABS_API_KEY in repimprov/.env", "processed": 0, "errors": 0}
 
         try:
             client = TwelveLabs(api_key=api_key)
             logger.info("TwelveLabs client initialised")
         except Exception as exc:
             logger.exception("Failed to initialise TwelveLabs client: %s", exc)
-            return {"error": f"TwelveLabs client error: {exc}"}
+            return {"message": f"ERROR: TwelveLabs client failed — {exc}", "processed": 0, "errors": 0}
 
         try:
             index = _get_or_create_index(client, "repimprov_analysis")
             logger.info("Using TwelveLabs index id=%s", index.id)
         except Exception as exc:
             logger.exception("Failed to get/create TwelveLabs index: %s", exc)
-            return {"error": f"Index setup failed: {exc}"}
+            return {"message": f"ERROR: Index setup failed — {exc}", "processed": 0, "errors": 0}
 
         processed = 0
         errors    = 0
@@ -277,17 +280,17 @@ class AnalyzeWorkoutForm(foo.Operator):
 def _get_or_create_index(client, name: str):
     """Return an existing TwelveLabs index by name, or create a new one."""
     try:
-        for index in client.index.list():
-            if index.name == name:
+        for index in client.indexes.list():
+            if index.index_name == name:
                 logger.info("Reusing existing index '%s' (id=%s)", name, index.id)
                 return index
     except Exception as exc:
         logger.warning("Could not list TwelveLabs indexes: %s — will attempt to create", exc)
 
     logger.info("Creating new TwelveLabs index '%s' …", name)
-    index = client.index.create(
-        name=name,
-        models=[{"name": PEGASUS_MODEL, "options": ["visual", "audio"]}],
+    index = client.indexes.create(
+        index_name=name,
+        models=[{"model_name": PEGASUS_MODEL, "model_options": ["visual", "audio"]}],
     )
     logger.info("Index created: id=%s", index.id)
     return index
