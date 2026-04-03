@@ -8,7 +8,7 @@ initializes all required fields, and launches the app.
 import fiftyone as fo
 from operator import eq
 
-VIDEO_DIR = "workout_videos"   # or absolute path
+VIDEO_DIR = "workoutfitness-video"   # or absolute path
 
 DATASET_NAME = "repimprov_dataset"
 
